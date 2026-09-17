@@ -1,25 +1,23 @@
 package com.example.rlpvp.rl.evaluation;
 
+import com.example.rlpvp.RLMain;
 import com.example.rlpvp.rl.network.ActorCritic;
-import com.example.rlpvp.rl.environment.EpisodeManager;
-import com.example.rlpvp.rl.environment.OpponentController;
+import com.example.rlpvp.rl.minecraft.MinecraftIntegration;
+import com.example.rlpvp.rl.minecraft.CombatEventHandler;
+import com.example.rlpvp.rl.minecraft.TrainingArena;
 import com.example.rlpvp.rl.observation.ObservationEncoder;
 import com.example.rlpvp.rl.observation.ObservationHistory;
-import com.example.rlpvp.rl.observation.SelfObservation;
-import com.example.rlpvp.rl.observation.TargetObservation;
-import com.example.rlpvp.rl.observation.CombatObservation;
-import com.example.rlpvp.rl.observation.AimObservation;
-import com.example.rlpvp.rl.observation.MovementObservation;
 import com.example.rlpvp.rl.action.ActionProcessor;
 import com.example.rlpvp.rl.action.ActionSpace;
 
 public class Evaluator {
     private final ActorCritic policy;
-    private final EpisodeManager episodeManager;
+    private final MinecraftIntegration minecraftIntegration;
+    private final CombatEventHandler combatEventHandler;
+    private final TrainingArena trainingArena;
     private final ObservationEncoder encoder;
     private final ObservationHistory history;
     private final ActionProcessor actionProcessor;
-    private final OpponentController opponent;
     private final EvaluationMetrics metrics;
 
     private float[] currentObs;
@@ -30,44 +28,39 @@ public class Evaluator {
     private int episodeCombo = 0;
     private float episodeDamageDealt = 0f;
     private float episodeDamageTaken = 0f;
-    private float episodeYawError = 0f;
-    private float episodePitchError = 0f;
-    private float episodeMovementEff = 0f;
-    private int episodeCrits = 0;
     private float episodeStartTime = 0f;
 
-    public Evaluator(ActorCritic policy, int obsDim, int historyLength, int actionDim) {
+    public Evaluator(ActorCritic policy, int obsDim, int historyLength, int actionDim,
+                     MinecraftIntegration minecraftIntegration, CombatEventHandler combatEventHandler,
+                     TrainingArena trainingArena) {
         this.policy = policy;
-        this.episodeManager = new EpisodeManager();
+        this.minecraftIntegration = minecraftIntegration;
+        this.combatEventHandler = combatEventHandler;
+        this.trainingArena = trainingArena;
         this.encoder = new ObservationEncoder();
         this.history = new ObservationHistory(historyLength, obsDim);
         this.actionProcessor = new ActionProcessor();
-        this.opponent = new OpponentController();
         this.metrics = new EvaluationMetrics();
 
         this.currentObs = new float[obsDim];
         this.currentAction = new float[actionDim];
     }
 
-    public void runEvaluation(int numEpisodes, OpponentController.OpponentType opponentType) {
+    public EvaluationMetrics runEvaluation(int numEpisodes) {
         metrics.reset();
-        opponent.setType(opponentType);
 
         for (int ep = 0; ep < numEpisodes; ep++) {
             runEpisode();
         }
+
+        return metrics;
     }
 
     private void runEpisode() {
-        episodeManager.startEpisode();
         history.clear();
+        combatEventHandler.reset();
 
-        float[] agentSpawn = episodeManager.getArena().getAgentSpawn();
-        episodeManager.setAgentPos(agentSpawn);
-
-        float[] targetSpawn = episodeManager.getArena().getTargetSpawn(agentSpawn);
-        episodeManager.setTargetPos(targetSpawn);
-        opponent.reset(targetSpawn);
+        trainingArena.startEpisode();
 
         episodeHits = 0;
         episodeAttacks = 0;
@@ -75,49 +68,31 @@ public class Evaluator {
         episodeCombo = 0;
         episodeDamageDealt = 0f;
         episodeDamageTaken = 0f;
-        episodeYawError = 0f;
-        episodePitchError = 0f;
-        episodeMovementEff = 0f;
-        episodeCrits = 0;
         episodeStartTime = System.currentTimeMillis();
 
-        while (episodeManager.isInEpisode()) {
+        while (trainingArena.isEpisodeActive()) {
             step();
         }
 
         float duration = (System.currentTimeMillis() - episodeStartTime) / 1000f;
-        float avgDistance = episodeManager.getArena().isInArena(
-            episodeManager.getAgentPos()[0], episodeManager.getAgentPos()[1], episodeManager.getAgentPos()[2]) ? 3.5f : 10f;
+        float avgDistance = combatEventHandler.getDistanceToTarget();
 
         metrics.recordEpisode(
-            episodeManager.getTargetHealth() <= 0,
+            trainingArena.getTrainingTarget() != null && trainingArena.getTrainingTarget().getHealth() <= 0,
             episodeDamageDealt, episodeDamageTaken,
             episodeHits, episodeAttacks, episodeWhiffs, episodeCombo,
-            duration, avgDistance, episodeYawError, episodePitchError,
-            episodeMovementEff, episodeCrits, duration, episodeManager.getEpisodeReward()
+            duration, avgDistance, 0f, 0f,
+            0f, 0f, duration, 0f
         );
+
+        trainingArena.endEpisode();
     }
 
     private void step() {
-        SelfObservation self = new SelfObservation();
-        TargetObservation target = new TargetObservation();
-        CombatObservation combat = new CombatObservation();
-        AimObservation aim = new AimObservation();
-        MovementObservation movement = new MovementObservation();
+        float[] obs = minecraftIntegration.collectObservations();
+        if (obs == null) return;
 
-        float[] agentPos = episodeManager.getAgentPos();
-        float[] targetPos = episodeManager.getTargetPos();
-
-        fillObservations(self, target, combat, aim, movement, agentPos, targetPos);
-
-        self.normalize();
-        target.normalize();
-        combat.normalize();
-        aim.normalize();
-        movement.normalize();
-
-        float[] encoded = encoder.encode(self, target, combat, aim, movement);
-        history.add(encoded);
+        history.add(obs);
 
         if (history.isFull()) {
             float[] flatObs = history.getFlattened();
@@ -126,46 +101,28 @@ public class Evaluator {
 
             actionProcessor.process(logits, currentAction);
 
-            float reward = episodeManager.step(currentAction, flatObs);
+            RLMain.getActionExecutor().execute(currentAction);
 
             if (currentAction[ActionSpace.IDX_ATTACK] > 0.5f) {
                 episodeAttacks++;
-                float dist = (float) Math.sqrt(
-                    (agentPos[0] - targetPos[0]) * (agentPos[0] - targetPos[0]) +
-                    (agentPos[1] - targetPos[1]) * (agentPos[1] - targetPos[1]) +
-                    (agentPos[2] - targetPos[2]) * (agentPos[2] - targetPos[2])
-                );
-                if (dist < 3.5f) {
-                    episodeHits++;
-                    episodeDamageDealt += 5f;
-                    episodeCombo++;
-                } else {
-                    episodeWhiffs++;
-                    episodeCombo = 0;
-                }
+                combatEventHandler.onPlayerAttack();
             }
-        }
 
-        opponent.tick(agentPos);
+            updateCombatStats();
+        }
     }
 
-    private void fillObservations(SelfObservation self, TargetObservation target, 
-                                  CombatObservation combat, AimObservation aim, 
-                                  MovementObservation movement, float[] agentPos, float[] targetPos) {
-        self.health = episodeManager.getAgentHealth();
-        self.posX = agentPos[0];
-        self.posY = agentPos[1];
-        self.posZ = agentPos[2];
+    private void updateCombatStats() {
+        if (combatEventHandler.wasLastAttackHit()) {
+            episodeHits++;
+            episodeDamageDealt += combatEventHandler.getLastDamageDealt();
+            episodeCombo = combatEventHandler.getComboCount();
+        } else if (currentAction[ActionSpace.IDX_ATTACK] > 0.5f) {
+            episodeWhiffs++;
+            episodeCombo = 0;
+        }
 
-        target.relPosX = targetPos[0] - agentPos[0];
-        target.relPosY = targetPos[1] - agentPos[1];
-        target.relPosZ = targetPos[2] - agentPos[2];
-        target.distance = (float) Math.sqrt(
-            target.relPosX * target.relPosX + 
-            target.relPosY * target.relPosY + 
-            target.relPosZ * target.relPosZ
-        );
-        target.health = episodeManager.getTargetHealth();
+        episodeDamageTaken += combatEventHandler.getLastDamageTaken();
     }
 
     public EvaluationMetrics getMetrics() {

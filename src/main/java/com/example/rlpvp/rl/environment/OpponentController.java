@@ -1,14 +1,19 @@
 package com.example.rlpvp.rl.environment;
 
+import java.util.Random;
+
 public class OpponentController {
     public enum OpponentType {
-        SCRIPTED_WEAK,
-        SCRIPTED_MEDIUM,
-        SCRIPTED_STRONG,
+        STATIONARY,
+        STRAFE_SLOW,
+        STRAFE_MEDIUM,
+        STRAFE_FAST,
+        AGGRESSIVE,
+        SMART,
         SELF_PLAY
     }
 
-    private OpponentType type = OpponentType.SCRIPTED_WEAK;
+    private OpponentType type = OpponentType.STATIONARY;
     private float[] position = new float[3];
     private float[] velocity = new float[3];
     private float health = 20f;
@@ -17,6 +22,7 @@ public class OpponentController {
     private int attackCooldown = 0;
     private int moveTimer = 0;
     private int movePattern = 0;
+    private final Random random = new Random();
 
     public void setType(OpponentType type) {
         this.type = type;
@@ -30,7 +36,7 @@ public class OpponentController {
         pitch = 0f;
         attackCooldown = 0;
         moveTimer = 0;
-        movePattern = (int) (Math.random() * 4);
+        movePattern = random.nextInt(4);
     }
 
     public void tick(float[] agentPos) {
@@ -41,35 +47,58 @@ public class OpponentController {
         if (attackCooldown > 0) attackCooldown--;
 
         switch (type) {
-            case SCRIPTED_WEAK:
-                weakBehavior(agentPos, dist, dx, dz);
+            case STATIONARY:
+                stationaryBehavior(dist, dx, dz);
                 break;
-            case SCRIPTED_MEDIUM:
-                mediumBehavior(agentPos, dist, dx, dz);
+            case STRAFE_SLOW:
+                strafeSlowBehavior(dist, dx, dz);
                 break;
-            case SCRIPTED_STRONG:
-                strongBehavior(agentPos, dist, dx, dz);
+            case STRAFE_MEDIUM:
+                strafeMediumBehavior(dist, dx, dz);
+                break;
+            case STRAFE_FAST:
+                strafeFastBehavior(dist, dx, dz);
+                break;
+            case AGGRESSIVE:
+                aggressiveBehavior(agentPos, dist, dx, dz);
+                break;
+            case SMART:
+                smartBehavior(agentPos, dist, dx, dz);
                 break;
             case SELF_PLAY:
                 break;
         }
     }
 
-    private void weakBehavior(float[] agentPos, float dist, float dx, float dz) {
+    private void stationaryBehavior(float dist, float dx, float dz) {
+        velocity[0] = velocity[2] = 0f;
+        if (attackCooldown == 0 && dist < 3.5f) {
+            attackCooldown = 25;
+        }
+        yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+    }
+
+    private void strafeSlowBehavior(float dist, float dx, float dz) {
         if (dist > 4f) {
             velocity[0] = dx / dist * 0.1f;
             velocity[2] = dz / dist * 0.1f;
         } else {
-            velocity[0] = velocity[2] = 0f;
+            velocity[0] = -dz / dist * 0.08f;
+            velocity[2] = dx / dist * 0.08f;
             if (attackCooldown == 0 && dist < 3.5f) {
                 attackCooldown = 20;
             }
         }
-
         yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
     }
 
-    private void mediumBehavior(float[] agentPos, float dist, float dx, float dz) {
+    private void strafeMediumBehavior(float dist, float dx, float dz) {
+        moveTimer--;
+        if (moveTimer <= 0) {
+            movePattern = random.nextInt(4);
+            moveTimer = 30 + random.nextInt(30);
+        }
+
         if (dist > 5f) {
             velocity[0] = dx / dist * 0.15f;
             velocity[2] = dz / dist * 0.15f;
@@ -77,56 +106,103 @@ public class OpponentController {
             velocity[0] = -dx / dist * 0.1f;
             velocity[2] = -dz / dist * 0.1f;
         } else {
-            velocity[0] = -dz / dist * 0.1f;
-            velocity[2] = dx / dist * 0.1f;
+            switch (movePattern) {
+                case 0: velocity[0] = -dz / dist * 0.12f; velocity[2] = dx / dist * 0.12f; break;
+                case 1: velocity[0] = dz / dist * 0.12f; velocity[2] = -dx / dist * 0.12f; break;
+                case 2: velocity[0] = dx / dist * 0.1f; velocity[2] = dz / dist * 0.1f; break;
+                case 3: velocity[0] = -dx / dist * 0.1f; velocity[2] = -dz / dist * 0.1f; break;
+            }
         }
 
         if (attackCooldown == 0 && dist < 3.5f) {
             attackCooldown = 15;
         }
-
         yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
     }
 
-    private void strongBehavior(float[] agentPos, float dist, float dx, float dz) {
+    private void strafeFastBehavior(float dist, float dx, float dz) {
         moveTimer--;
         if (moveTimer <= 0) {
-            movePattern = (int) (Math.random() * 6);
-            moveTimer = 20 + (int) (Math.random() * 40);
+            movePattern = random.nextInt(5);
+            moveTimer = 15 + random.nextInt(20);
+        }
+
+        if (dist > 5f) {
+            velocity[0] = dx / dist * 0.2f;
+            velocity[2] = dz / dist * 0.2f;
+        } else if (dist < 3f) {
+            velocity[0] = -dx / dist * 0.15f;
+            velocity[2] = -dz / dist * 0.15f;
+        } else {
+            switch (movePattern) {
+                case 0: velocity[0] = -dz / dist * 0.18f; velocity[2] = dx / dist * 0.18f; break;
+                case 1: velocity[0] = dz / dist * 0.18f; velocity[2] = -dx / dist * 0.18f; break;
+                case 2: velocity[0] = dx / dist * 0.15f; velocity[2] = dz / dist * 0.15f; break;
+                case 3: velocity[0] = -dx / dist * 0.15f; velocity[2] = -dz / dist * 0.15f; break;
+                case 4: velocity[0] = -dz / dist * 0.15f; velocity[2] = dx / dist * 0.15f; velocity[1] = 0.3f; break;
+            }
+        }
+
+        if (attackCooldown == 0 && dist < 3.5f && random.nextFloat() < 0.4f) {
+            attackCooldown = 12;
+        }
+        yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+    }
+
+    private void aggressiveBehavior(float[] agentPos, float dist, float dx, float dz) {
+        moveTimer--;
+        if (moveTimer <= 0) {
+            movePattern = random.nextInt(6);
+            moveTimer = 10 + random.nextInt(20);
         }
 
         switch (movePattern) {
-            case 0: // Approach
-                velocity[0] = dx / dist * 0.2f;
-                velocity[2] = dz / dist * 0.2f;
-                break;
-            case 1: // Retreat
-                velocity[0] = -dx / dist * 0.15f;
-                velocity[2] = -dz / dist * 0.15f;
-                break;
-            case 2: // Strafe left
-                velocity[0] = -dz / dist * 0.15f;
-                velocity[2] = dx / dist * 0.15f;
-                break;
-            case 3: // Strafe right
-                velocity[0] = dz / dist * 0.15f;
-                velocity[2] = -dx / dist * 0.15f;
-                break;
-            case 4: // Circle
-                velocity[0] = -dz / dist * 0.2f;
-                velocity[2] = dx / dist * 0.2f;
-                break;
-            case 5: // Jump attack
-                velocity[1] = 0.4f;
-                velocity[0] = dx / dist * 0.1f;
-                velocity[2] = dz / dist * 0.1f;
-                break;
+            case 0: velocity[0] = dx / dist * 0.25f; velocity[2] = dz / dist * 0.25f; break;
+            case 1: velocity[0] = -dx / dist * 0.1f; velocity[2] = -dz / dist * 0.1f; break;
+            case 2: velocity[0] = -dz / dist * 0.2f; velocity[2] = dx / dist * 0.2f; break;
+            case 3: velocity[0] = dz / dist * 0.2f; velocity[2] = -dx / dist * 0.2f; break;
+            case 4: velocity[0] = -dz / dist * 0.2f; velocity[2] = dx / dist * 0.2f; velocity[1] = 0.4f; break;
+            case 5: velocity[0] = dx / dist * 0.3f; velocity[2] = dz / dist * 0.3f; break;
         }
 
-        if (attackCooldown == 0 && dist < 3.5f && Math.random() < 0.3) {
+        if (attackCooldown == 0 && dist < 3.5f && random.nextFloat() < 0.5f) {
             attackCooldown = 10;
         }
+        yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+    }
 
+    private void smartBehavior(float[] agentPos, float dist, float dx, float dz) {
+        moveTimer--;
+        if (moveTimer <= 0) {
+            movePattern = random.nextInt(8);
+            moveTimer = 8 + random.nextInt(15);
+        }
+
+        float playerHealth = 20f; // Would be passed in real implementation
+        
+        if (dist > 6f) {
+            velocity[0] = dx / dist * 0.22f;
+            velocity[2] = dz / dist * 0.22f;
+        } else if (dist < 2.5f) {
+            velocity[0] = -dx / dist * 0.2f;
+            velocity[2] = -dz / dist * 0.2f;
+            velocity[1] = 0.35f;
+        } else {
+            switch (movePattern) {
+                case 0: velocity[0] = -dz / dist * 0.18f; velocity[2] = dx / dist * 0.18f; break;
+                case 1: velocity[0] = dz / dist * 0.18f; velocity[2] = -dx / dist * 0.18f; break;
+                case 2: velocity[0] = dx / dist * 0.15f; velocity[2] = dz / dist * 0.15f; break;
+                case 3: velocity[0] = -dx / dist * 0.15f; velocity[2] = -dz / dist * 0.15f; break;
+                case 4: velocity[0] = -dz / dist * 0.2f; velocity[2] = dx / dist * 0.2f; velocity[1] = 0.4f; break;
+                case 5: velocity[0] = dx / dist * 0.2f; velocity[2] = dz / dist * 0.2f; break;
+                case 6: velocity[0] = 0; velocity[2] = 0; break;
+                case 7: velocity[1] = 0.42f; velocity[0] = dx / dist * 0.1f; velocity[2] = dz / dist * 0.1f; break;
+            }
+        }
+
+        if (attackCooldown == 0 && dist < 3.5f && random.nextFloat() < 0.6f) {
+            attackCooldown = 8;
+        }
         yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
     }
 

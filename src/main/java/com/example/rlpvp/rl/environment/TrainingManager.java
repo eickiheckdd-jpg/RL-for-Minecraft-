@@ -1,25 +1,26 @@
 package com.example.rlpvp.rl.environment;
 
+import com.example.rlpvp.RLMain;
+import com.example.rlpvp.config.RLConfig;
+import com.example.rlpvp.rl.minecraft.MinecraftIntegration;
+import com.example.rlpvp.rl.minecraft.ActionExecutor;
+import com.example.rlpvp.rl.minecraft.CombatEventHandler;
+import com.example.rlpvp.rl.minecraft.TrainingArena;
 import com.example.rlpvp.rl.network.ActorCritic;
 import com.example.rlpvp.rl.ppo.RolloutBuffer;
 import com.example.rlpvp.rl.ppo.GAE;
 import com.example.rlpvp.rl.ppo.PPO;
 import com.example.rlpvp.rl.observation.ObservationEncoder;
 import com.example.rlpvp.rl.observation.ObservationHistory;
-import com.example.rlpvp.rl.observation.SelfObservation;
-import com.example.rlpvp.rl.observation.TargetObservation;
-import com.example.rlpvp.rl.observation.CombatObservation;
-import com.example.rlpvp.rl.observation.AimObservation;
-import com.example.rlpvp.rl.observation.MovementObservation;
-import com.example.rlpvp.rl.action.ActionProcessor;
-import com.example.rlpvp.rl.action.ActionSpace;
-import com.example.rlpvp.rl.reward.RewardCalculator;
-import com.example.rlpvp.rl.reward.RewardConfig;
 import com.example.rlpvp.rl.curriculum.CurriculumManager;
 import com.example.rlpvp.rl.curriculum.CurriculumStage;
 import com.example.rlpvp.rl.checkpoint.CheckpointManager;
 import com.example.rlpvp.rl.evaluation.Evaluator;
 import com.example.rlpvp.rl.evaluation.EvaluationMetrics;
+import com.example.rlpvp.rl.reward.RewardCalculator;
+import com.example.rlpvp.rl.reward.RewardConfig;
+import com.example.rlpvp.rl.action.ActionProcessor;
+import com.example.rlpvp.rl.action.ActionSpace;
 
 public class TrainingManager {
 
@@ -30,6 +31,11 @@ public class TrainingManager {
     private float episodeReward = 0f;
     private float winRate = 0f;
     private float hitRate = 0f;
+
+    private final MinecraftIntegration minecraftIntegration;
+    private final ActionExecutor actionExecutor;
+    private final CombatEventHandler combatEventHandler;
+    private final TrainingArena trainingArena;
 
     private ActorCritic policy;
     private RolloutBuffer rolloutBuffer;
@@ -42,8 +48,6 @@ public class TrainingManager {
     private ObservationHistory history;
     private ActionProcessor actionProcessor;
     private RewardCalculator rewardCalculator;
-    private EpisodeManager episodeManager;
-    private OpponentController opponent;
 
     private float[] currentObs;
     private float[] currentAction;
@@ -62,45 +66,99 @@ public class TrainingManager {
     private float episodeDamageDealt = 0f;
     private float episodeDamageTaken = 0f;
 
-    public TrainingManager() {
+    private boolean evaluating = false;
+
+    public TrainingManager(MinecraftIntegration minecraftIntegration, ActionExecutor actionExecutor,
+                           CombatEventHandler combatEventHandler, TrainingArena trainingArena) {
+        this.minecraftIntegration = minecraftIntegration;
+        this.actionExecutor = actionExecutor;
+        this.combatEventHandler = combatEventHandler;
+        this.trainingArena = trainingArena;
+
         this.obsDim = ObservationEncoder.getObsDim();
         this.actionDim = ActionSpace.TOTAL_DIM;
-        this.historyLength = 8;
-        this.rolloutLength = 2048;
+        this.historyLength = RLConfig.INSTANCE.training.historyLength;
+        this.rolloutLength = RLConfig.INSTANCE.ppo.rolloutLength;
 
-        int[] hiddenSizes = {256, 128, 64};
+        int[] hiddenSizes = RLConfig.INSTANCE.network.hiddenSizes;
         
         this.policy = new ActorCritic(obsDim * historyLength, hiddenSizes, actionDim);
         this.rolloutBuffer = new RolloutBuffer(rolloutLength, obsDim * historyLength, actionDim);
-        this.gae = new GAE(rolloutLength, 0.99f, 0.95f);
-        this.ppo = new PPO(policy, 3e-4f, 0.2f, 0.01f, 0.5f, 0.5f, 4, 256);
-        this.curriculum = new CurriculumManager();
-        this.evaluator = new Evaluator(policy, obsDim, historyLength, actionDim);
+        this.gae = new GAE(rolloutLength, RLConfig.INSTANCE.ppo.gamma, RLConfig.INSTANCE.ppo.gaeLambda);
+        this.ppo = new PPO(policy, RLConfig.INSTANCE.ppo.learningRate, RLConfig.INSTANCE.ppo.clipEpsilon, 
+                          RLConfig.INSTANCE.ppo.entropyCoef, RLConfig.INSTANCE.ppo.valueCoef, 
+                          RLConfig.INSTANCE.ppo.maxGradNorm, RLConfig.INSTANCE.ppo.ppoEpochs, RLConfig.INSTANCE.ppo.minibatchSize);
+        this.curriculum = new CurriculumManager(RLConfig.INSTANCE.curriculum);
+        this.evaluator = new Evaluator(policy, obsDim, historyLength, actionDim, minecraftIntegration, combatEventHandler, trainingArena);
 
         this.encoder = new ObservationEncoder();
         this.history = new ObservationHistory(historyLength, obsDim);
         this.actionProcessor = new ActionProcessor();
-        this.rewardCalculator = new RewardCalculator(new RewardConfig());
-        this.episodeManager = new EpisodeManager();
-        this.opponent = new OpponentController();
+        
+        RewardConfig rewardConfig = new RewardConfig();
+        copyRewardConfig(rewardConfig);
+        this.rewardCalculator = new RewardCalculator(rewardConfig);
 
         this.currentObs = new float[obsDim];
         this.currentAction = new float[actionDim];
         this.flatObs = new float[obsDim * historyLength];
 
         CurriculumStage stage = curriculum.getCurrentStage();
-        opponent.setType(stage.getOpponentType());
+        configureStage(stage);
+    }
+
+    private void copyRewardConfig(RewardConfig config) {
+        RLConfig.RewardConfig src = RLConfig.INSTANCE.reward;
+        config.hitReward = src.hitReward;
+        config.damageDealtReward = src.damageDealtReward;
+        config.criticalHitBonus = src.criticalHitBonus;
+        config.comboReward = src.comboReward;
+        config.goodTrackingReward = src.goodTrackingReward;
+        config.spacingReward = src.spacingReward;
+        config.counterHitReward = src.counterHitReward;
+        config.whiffPunishReward = src.whiffPunishReward;
+        config.survivalReward = src.survivalReward;
+        config.winReward = src.winReward;
+        config.damageTakenPenalty = src.damageTakenPenalty;
+        config.whiffPenalty = src.whiffPenalty;
+        config.badSpacingPenalty = src.badSpacingPenalty;
+        config.poorTimingPenalty = src.poorTimingPenalty;
+        config.randomMovementPenalty = src.randomMovementPenalty;
+        config.excessiveJumpPenalty = src.excessiveJumpPenalty;
+        config.loseTargetPenalty = src.loseTargetPenalty;
+        config.deathPenalty = src.deathPenalty;
+        config.missedOpportunityPenalty = src.missedOpportunityPenalty;
+        config.exploitationSpinPenalty = src.exploitationSpinPenalty;
+        config.exploitationStrafePenalty = src.exploitationStrafePenalty;
+        config.exploitationAttackPenalty = src.exploitationAttackPenalty;
+        config.exploitationDamagePenalty = src.exploitationDamagePenalty;
+        config.enableExploitationPrevention = src.enableExploitationPrevention;
     }
 
     public void setEnabled(boolean enabled) {
         this.enabled = enabled;
         if (enabled) {
             startNewEpisode();
+        } else {
+            actionExecutor.reset();
+            trainingArena.endEpisode();
+            combatEventHandler.reset();
         }
     }
 
     public boolean isEnabled() {
         return enabled;
+    }
+
+    public void toggleEvaluation() {
+        if (!enabled && !evaluating) {
+            evaluating = true;
+            new Thread(() -> {
+                EvaluationMetrics metrics = evaluator.runEvaluation(RLConfig.INSTANCE.training.evalEpisodes);
+                System.out.println("[RL-PvP] Evaluation: " + formatMetrics(metrics));
+                evaluating = false;
+            }).start();
+        }
     }
 
     public void tick() {
@@ -109,11 +167,14 @@ public class TrainingManager {
         trainingStep++;
         stepsSinceUpdate++;
 
-        if (episodeManager.isInEpisode()) {
-            step();
-        } else {
+        if (!trainingArena.isEpisodeActive()) {
             startNewEpisode();
+        } else {
+            step();
+            trainingArena.tick();
         }
+
+        combatEventHandler.tick();
 
         if (stepsSinceUpdate >= rolloutLength && rolloutBuffer.isFull()) {
             updatePolicy();
@@ -123,6 +184,14 @@ public class TrainingManager {
         currentStage = curriculum.getCurrentStageId();
         winRate = curriculum.getWinRate();
         hitRate = curriculum.getHitRate();
+
+        if (RLConfig.INSTANCE.training.autoSave && trainingStep % RLConfig.INSTANCE.training.checkpointInterval == 0) {
+            try {
+                saveCheckpoint("checkpoint_auto_" + trainingStep + ".bin");
+            } catch (Exception e) {
+                System.err.println("[RL-PvP] Auto-save failed: " + e.getMessage());
+            }
+        }
     }
 
     private void startNewEpisode() {
@@ -135,24 +204,31 @@ public class TrainingManager {
         episodeDamageDealt = 0f;
         episodeDamageTaken = 0f;
 
-        episodeManager.startEpisode();
         history.clear();
+        combatEventHandler.reset();
+        minecraftIntegration.reset();
+        actionExecutor.reset();
 
-        float[] agentSpawn = episodeManager.getArena().getAgentSpawn();
-        episodeManager.setAgentPos(agentSpawn);
-
-        float[] targetSpawn = episodeManager.getArena().getTargetSpawn(agentSpawn);
-        episodeManager.setTargetPos(targetSpawn);
+        trainingArena.startEpisode();
+        
+        minecraftIntegration.setPlayer(RLMain.getMinecraftIntegration().client.player);
+        if (trainingArena.getTrainingTarget() != null) {
+            minecraftIntegration.setTarget(trainingArena.getTrainingTarget());
+            combatEventHandler.setCurrentTarget(trainingArena.getTrainingTarget());
+        }
 
         CurriculumStage stage = curriculum.getCurrentStage();
-        opponent.setType(stage.getOpponentType());
-        opponent.reset(targetSpawn);
+        configureStage(stage);
     }
 
     private void step() {
-        fillAndEncodeObservations();
+        float[] obs = minecraftIntegration.collectObservations();
+        
+        if (obs == null || obs.length != obsDim) {
+            return;
+        }
 
-        history.add(encoder.getEncoded());
+        history.add(obs);
 
         if (history.isFull()) {
             System.arraycopy(history.getFlattened(), 0, flatObs, 0, flatObs.length);
@@ -162,79 +238,67 @@ public class TrainingManager {
             float value = policy.getValue();
 
             actionProcessor.process(logits, currentAction);
+            actionExecutor.execute(currentAction);
 
-            float reward = episodeManager.step(currentAction, flatObs);
+            float reward = computeReward();
             episodeReward += reward;
 
-            rolloutBuffer.add(flatObs, currentAction, reward, value, 0f, !episodeManager.isInEpisode());
+            boolean done = !trainingArena.isEpisodeActive();
+            rolloutBuffer.add(flatObs, currentAction, reward, value, 0f, done);
 
             if (currentAction[ActionSpace.IDX_ATTACK] > 0.5f) {
                 episodeAttacks++;
-                float dist = distance(episodeManager.getAgentPos(), episodeManager.getTargetPos());
-                if (dist < 3.5f) {
-                    episodeHits++;
-                    episodeDamageDealt += 5f;
-                    episodeCombo++;
-                } else {
-                    episodeWhiffs++;
-                    episodeCombo = 0;
-                }
+                combatEventHandler.onPlayerAttack();
             }
-        }
 
-        opponent.tick(episodeManager.getAgentPos());
-
-        if (!episodeManager.isInEpisode()) {
-            boolean won = episodeManager.getTargetHealth() <= 0;
-            curriculum.onEpisodeEnd(won, episodeHits, episodeAttacks);
-
-            CurriculumStage newStage = curriculum.getCurrentStage();
-            if (newStage.getStageId() != opponent.getType().ordinal()) {
-                opponent.setType(newStage.getOpponentType());
-            }
+            updateCombatStats();
         }
     }
 
-    private void fillAndEncodeObservations() {
-        SelfObservation self = new SelfObservation();
-        TargetObservation target = new TargetObservation();
-        CombatObservation combat = new CombatObservation();
-        AimObservation aim = new AimObservation();
-        MovementObservation movement = new MovementObservation();
+    private float computeReward() {
+        boolean hit = combatEventHandler.wasLastAttackHit();
+        boolean critical = combatEventHandler.wasLastAttackCritical();
+        int combo = combatEventHandler.getComboCount();
+        float damageDealt = combatEventHandler.getLastDamageDealt();
+        float damageTaken = combatEventHandler.getLastDamageTaken();
+        float distance = combatEventHandler.getDistanceToTarget();
+        
+        float yawError = 0f;
+        float pitchError = 0f;
+        if (minecraftIntegration.getTarget() != null) {
+            yawError = Math.abs(minecraftIntegration.getTarget().getYaw() - RLMain.getMinecraftIntegration().client.player.getYaw());
+            pitchError = Math.abs(minecraftIntegration.getTarget().getPitch() - RLMain.getMinecraftIntegration().client.player.getPitch());
+        }
 
-        float[] agentPos = episodeManager.getAgentPos();
-        float[] targetPos = episodeManager.getTargetPos();
+        boolean won = trainingArena.getTrainingTarget() != null && trainingArena.getTrainingTarget().getHealth() <= 0;
+        boolean died = RLMain.getMinecraftIntegration().client.player != null && RLMain.getMinecraftIntegration().client.player.getHealth() <= 0;
 
-        self.health = episodeManager.getAgentHealth();
-        self.posX = agentPos[0];
-        self.posY = agentPos[1];
-        self.posZ = agentPos[2];
-
-        target.relPosX = targetPos[0] - agentPos[0];
-        target.relPosY = targetPos[1] - agentPos[1];
-        target.relPosZ = targetPos[2] - agentPos[2];
-        target.distance = distance(agentPos, targetPos);
-        target.health = episodeManager.getTargetHealth();
-
-        self.normalize();
-        target.normalize();
-        combat.normalize();
-        aim.normalize();
-        movement.normalize();
-
-        encoder.encode(self, target, combat, aim, movement);
+        return rewardCalculator.compute(
+            null, null, currentAction,
+            hit, damageDealt, damageTaken,
+            critical, combo > 1, !hit && currentAction[ActionSpace.IDX_ATTACK] > 0.5f,
+            false, won, died,
+            distance, yawError, pitchError,
+            combatEventHandler.getTimeSinceLastHit()
+        );
     }
 
-    private float distance(float[] a, float[] b) {
-        float dx = a[0] - b[0];
-        float dy = a[1] - b[1];
-        float dz = a[2] - b[2];
-        return (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
+    private void updateCombatStats() {
+        if (combatEventHandler.wasLastAttackHit()) {
+            episodeHits++;
+            episodeDamageDealt += combatEventHandler.getLastDamageDealt();
+            episodeCombo = combatEventHandler.getComboCount();
+        } else if (currentAction[ActionSpace.IDX_ATTACK] > 0.5f) {
+            episodeWhiffs++;
+            episodeCombo = 0;
+        }
+        
+        episodeDamageTaken += combatEventHandler.getLastDamageTaken();
     }
 
     private void updatePolicy() {
         float lastValue = 0f;
-        boolean lastDone = !episodeManager.isInEpisode();
+        boolean lastDone = !trainingArena.isEpisodeActive();
         
         if (rolloutBuffer.size > 0) {
             int lastIdx = rolloutBuffer.get(rolloutBuffer.size - 1);
@@ -248,9 +312,15 @@ public class TrainingManager {
         rolloutBuffer.clear();
     }
 
+    private void configureStage(CurriculumStage stage) {
+        if (trainingArena.getTrainingTarget() != null) {
+            // Configure target behavior based on stage
+        }
+    }
+
     public void saveCheckpoint(String filename) throws Exception {
         CheckpointManager.save(filename, policy, curriculum, trainingStep, null, null, 
-            3e-4f, historyLength, new int[]{256, 128, 64});
+            RLConfig.INSTANCE.ppo.learningRate, historyLength, RLConfig.INSTANCE.network.hiddenSizes);
     }
 
     public void loadCheckpoint(String filename) throws Exception {
@@ -264,8 +334,11 @@ public class TrainingManager {
     }
 
     public EvaluationMetrics evaluate(int numEpisodes) {
-        evaluator.runEvaluation(numEpisodes, OpponentController.OpponentType.SCRIPTED_MEDIUM);
-        return evaluator.getMetrics();
+        return evaluator.runEvaluation(numEpisodes);
+    }
+
+    public CurriculumManager getCurriculumManager() {
+        return curriculum;
     }
 
     public int getCurrentStage() { return currentStage; }
@@ -274,4 +347,11 @@ public class TrainingManager {
     public float getEpisodeReward() { return episodeReward; }
     public float getWinRate() { return winRate; }
     public float getHitRate() { return hitRate; }
+
+    private String formatMetrics(EvaluationMetrics m) {
+        return String.format("Win: %.1f%% | Dmg Dealt: %.1f | Dmg Taken: %.1f | Hit: %.1f%% | Whiff: %.1f%% | Combo: %d | Survive: %.1fs",
+            m.getWinRate() * 100, m.getAvgDamageDealt(), m.getAvgDamageTaken(),
+            m.getHitRate() * 100, m.getWhiffRate() * 100,
+            m.getMaxCombo(), m.getAvgSurvivalTime());
+    }
 }
