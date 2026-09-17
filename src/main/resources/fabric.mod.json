@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "rlpvp",
+  "version": "0.1.0-SNAPSHOT",
+  "name": "RL PvP Agent",
+  "description": "Reinforcement Learning PvP AI for Minecraft 1.21.11",
+  "authors": ["RL Engineer"],
+  "contact": {},
+  "license": "MIT",
+  "icon": "assets/rlpvp/icon.png",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "com.example.rlpvp.RLMain"
+    ]
+  },
+  "mixins": [],
+  "depends": {
+    "fabricloader": ">=0.16.10",
+    "minecraft": "~1.21.11",
+    "java": ">=21",
+    "fabric-api": "*"
+  },
+  "custom": {
+    "fabric-api:datagen": "false"
+  }
+}
