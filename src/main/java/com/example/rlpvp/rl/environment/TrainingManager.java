@@ -2,10 +2,12 @@ package com.example.rlpvp.rl.environment;
 
 import com.example.rlpvp.RLMain;
 import com.example.rlpvp.config.RLConfig;
+import com.example.rlpvp.rl.minecraft.CarpetIntegration;
 import com.example.rlpvp.rl.minecraft.MinecraftIntegration;
 import com.example.rlpvp.rl.minecraft.ActionExecutor;
 import com.example.rlpvp.rl.minecraft.CombatEventHandler;
 import com.example.rlpvp.rl.minecraft.TrainingArena;
+import net.minecraft.util.math.Vec3d;
 import com.example.rlpvp.rl.network.ActorCritic;
 import com.example.rlpvp.rl.ppo.RolloutBuffer;
 import com.example.rlpvp.rl.ppo.GAE;
@@ -36,6 +38,7 @@ public class TrainingManager {
     private final ActionExecutor actionExecutor;
     private final CombatEventHandler combatEventHandler;
     private final TrainingArena trainingArena;
+    private final CarpetIntegration carpetIntegration;
 
     private ActorCritic policy;
     private RolloutBuffer rolloutBuffer;
@@ -74,6 +77,7 @@ public class TrainingManager {
         this.actionExecutor = actionExecutor;
         this.combatEventHandler = combatEventHandler;
         this.trainingArena = trainingArena;
+        this.carpetIntegration = new CarpetIntegration();
 
         this.obsDim = ObservationEncoder.getObsDim();
         this.actionDim = ActionSpace.TOTAL_DIM;
@@ -172,6 +176,20 @@ public class TrainingManager {
         } else {
             step();
             trainingArena.tick();
+        }
+
+        // Handle carpet self-play opponents
+        CurriculumStage currentStageObj = curriculum.getCurrentStage();
+        if (currentStageObj.getOpponentType() == OpponentController.OpponentType.SELF_PLAY) {
+            if (CarpetIntegration.isCarpetAvailable()) {
+                carpetIntegration.setPolicy(policy);
+                Vec3d agentPos = RLMain.getMinecraftIntegration().client.player != null ? 
+                    RLMain.getMinecraftIntegration().client.player.getPos() : Vec3d.ZERO;
+                carpetIntegration.tickFakePlayers(agentPos);
+            } else {
+                // Fallback to SMART opponent if carpet not available
+                // This is handled by the training arena spawning a smart zombie
+            }
         }
 
         combatEventHandler.tick();
@@ -313,10 +331,31 @@ public class TrainingManager {
     }
 
     private void configureStage(CurriculumStage stage) {
-        if (trainingArena.getTrainingTarget() != null) {
-            // Configure target behavior based on stage
+        OpponentController.OpponentType type = stage.getOpponentType();
+        
+        if (type == OpponentController.OpponentType.SELF_PLAY) {
+            if (CarpetIntegration.isCarpetAvailable()) {
+                // Clear any existing target, carpet will create fake players
+                trainingArena.removeTarget();
+                carpetIntegration.removeAllFakePlayers();
+                
+                // Create fake players after arena starts
+                Vec3d arenaCenter = trainingArena.getArenaCenter();
+                if (arenaCenter != null && !arenaCenter.equals(Vec3d.ZERO)) {
+                    for (int i = 0; i < 3; i++) {
+                        Vec3d spawnPos = arenaCenter.add(
+                            (random.nextDouble() - 0.5) * 10,
+                            0,
+                            (random.nextDouble() - 0.5) * 10
+                        );
+                        carpetIntegration.createFakePlayer(spawnPos);
+                    }
+                }
+            }
         }
     }
+    
+    private final Random random = new Random();
 
     public void saveCheckpoint(String filename) throws Exception {
         CheckpointManager.save(filename, policy, curriculum, trainingStep, null, null, 
